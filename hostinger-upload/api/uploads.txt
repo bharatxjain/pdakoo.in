@@ -1,0 +1,214 @@
+/**
+ * File Upload Service
+ * Handles file uploads to Hostinger backend API
+ * Works with Pdakoo project files
+ */
+
+import { db } from './firebase';
+import { collection, doc, updateDoc, serverTimestamp } from 'firebase/firestore';
+
+// Get API base URL from environment or use default
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
+
+export interface UploadedFile {
+  name: string;
+  filename: string;
+  size: number;
+  type: string;
+  path: string;
+  uploadedAt: string;
+  uploadedBy: string;
+}
+
+export interface UploadProgress {
+  fileIndex: number;
+  loaded: number;
+  total: number;
+  percent: number;
+}
+
+/**
+ * Upload files to project on Hostinger backend
+ */
+export async function uploadProjectFiles(
+  projectId: string,
+  files: File[],
+  adminUid: string,
+  onProgress?: (progress: UploadProgress) => void
+): Promise<UploadedFile[]> {
+  try {
+    const formData = new FormData();
+
+    // Add all files to form data
+    files.forEach((file, index) => {
+      formData.append('files', file);
+    });
+
+    // Add metadata
+    formData.append('projectId', projectId);
+    formData.append('adminUid', adminUid);
+
+    // Create XMLHttpRequest for progress tracking
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+
+      // Track upload progress
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable) {
+          const percentComplete = Math.round((event.loaded / event.total) * 100);
+          onProgress?.({
+            fileIndex: 0,
+            loaded: event.loaded,
+            total: event.total,
+            percent: percentComplete
+          });
+        }
+      });
+
+      // Handle completion
+      xhr.addEventListener('load', async () => {
+        if (xhr.status === 200) {
+          const response = JSON.parse(xhr.responseText);
+          resolve(response.files);
+        } else {
+          const error = JSON.parse(xhr.responseText);
+          reject(new Error(error.error || 'Upload failed'));
+        }
+      });
+
+      // Handle error
+      xhr.addEventListener('error', () => {
+        reject(new Error('Network error during upload'));
+      });
+
+      // Handle abort
+      xhr.addEventListener('abort', () => {
+        reject(new Error('Upload cancelled'));
+      });
+
+      // Send request
+      xhr.open('POST', `${API_BASE_URL}/projects/${projectId}/upload`);
+      xhr.send(formData);
+    });
+  } catch (error) {
+    console.error('File upload error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get download URL for a file
+ */
+export function getDownloadUrl(projectId: string, filename: string, userId: string): string {
+  return `${API_BASE_URL}/projects/${projectId}/files/${filename}?uid=${userId}`;
+}
+
+/**
+ * Download a file
+ */
+export async function downloadFile(
+  projectId: string,
+  filename: string,
+  userId: string,
+  originalFileName?: string
+): Promise<void> {
+  try {
+    const downloadUrl = getDownloadUrl(projectId, filename, userId);
+
+    // Create a link and click it
+    const link = document.createElement('a');
+    link.href = downloadUrl;
+    link.download = originalFileName || filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  } catch (error) {
+    console.error('Download error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get list of files for a project
+ */
+export async function getProjectFiles(projectId: string): Promise<UploadedFile[]> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/projects/${projectId}/files`);
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch files: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data.files || [];
+  } catch (error) {
+    console.error('Get files error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Delete a file from project
+ */
+export async function deleteProjectFile(
+  projectId: string,
+  filename: string,
+  adminUid: string
+): Promise<void> {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/projects/${projectId}/files/${filename}`,
+      {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ adminUid })
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to delete file');
+    }
+  } catch (error) {
+    console.error('Delete file error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Track file download in Firestore
+ */
+export async function trackDownload(
+  userId: string,
+  projectId: string,
+  fileName: string,
+  fileSize: number
+): Promise<void> {
+  try {
+    await doc(collection(db, 'downloads')).set({
+      userId,
+      projectId,
+      fileName,
+      fileSize,
+      downloadedAt: serverTimestamp()
+    });
+  } catch (error) {
+    console.warn('Failed to track download:', error);
+    // Don't throw - tracking failure shouldn't break the download
+  }
+}
+
+/**
+ * Health check for API
+ */
+export async function checkApiHealth(): Promise<boolean> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/health`);
+    return response.ok;
+  } catch (error) {
+    console.warn('API health check failed:', error);
+    return false;
+  }
+}
